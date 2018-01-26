@@ -1,0 +1,516 @@
+---
+title: "Loan Predicion"
+output:
+  html_document: default
+  pdf_document: default
+---
+## Read in the dataset
+```{r}
+library(readxl)
+setwd("~/Dropbox/Loan Prediction/Dataset")
+loan <- read.csv("loan.csv", header = T, stringsAsFactors = F)
+loanT <- loan
+```
+
+## Data Cleaning
+```{r}
+# remove all unique and single
+loan[, c("id", "member_id", "url", "desc")] <- NULL
+
+# drop loan payment features
+loan[, c("installment", "funded_amnt", "funded_amnt_inv",
+         "last_pymnt_amnt", "last_pymnt_d", "next_pymnt_d", 'gen_add_state_zip',
+         "pymnt_plan", "recoveries", "total_pymnt",
+         "total_pymnt_inv", "total_rec_int", "total_rec_late_fee",
+         "total_rec_prncp", "collection_recovery_fee", "out_prncp", "out_prncp_inv")] <- NULL
+
+# drop potential response variables
+loan[, c("grade", "sub_grade", "loan_status")] <- NULL
+
+# drop other non-useful features
+loan[, c("zip_code", "earliest_cr_line", "policy_code", "title", "purpose", "emp_title", "last_credit_pull_d", "verification_status_joint","issue_d")] <- NULL
+
+# Feature Engineering
+loan$dti <- ifelse(!is.na(loan$dti_joint), loan$dti_joint, loan$dti)
+loan$annual_inc <- ifelse(!is.na(loan$annual_inc_joint), loan$annual_inc_joint, loan$annual_inc)
+loan$home_ownership <- ifelse(loan$home_ownership %in% c('ANY', 'NONE', 'OTHER'), 'OTHER',
+                              loan$home_ownership)
+
+# Cluster states with similar feature into new level: low, medium, high
+int_state <- by(loan, loan$addr_state, function(x){
+  return(mean(x$int_rate))
+})
+loan$addr_state <- 
+  with(loan, ifelse(addr_state %in% names(int_state)[which(int_state <= quantile(int_state, 0.25))], "low", 
+         ifelse(addr_state %in% names(int_state[which(int_state <= quantile(int_state,0.5))]), "lowmedium",
+                ifelse(addr_state %in% names(int_state[which(int_state <= quantile(int_state, 0.75))]), "highmedium", "high"))))
+
+# since there is no major difference among 1-9 years, cateogrize into 2 groups: <10, >10
+loan$emp_length <- with(loan, ifelse(emp_length == "10+ years", ">10", "<10"))
+
+# Checking missing values
+num.NA <- sort(sapply(loan, function(x) {sum(is.na(x))}), decreasing = T)
+head(num.NA, 20)
+
+# remove columns with more than 80% NA values
+remain.col <- names(num.NA)[which(num.NA <= 0.2 * dim(loan)[1])]
+remain.loan <- loan[ ,remain.col]
+
+# check percentage of missing values
+sum(is.na(remain.loan)) / (ncol(remain.loan) * nrow(remain.loan))
+sort(sapply(remain.loan, function(x) {sum(is.na(x))}), decreasing = T)
+```
+* There are 0.1% missing values in the dataset and 23 features.
+
+## Treating missing values (MICE)
+```{r}
+library(ggplot2)
+num.NA <- sort(sapply(remain.loan, function(x) {sum(is.na(x))}), decreasing = T)
+dfnum.NA <- data.frame(ind = c(1:length(num.NA)),
+                       percentage = num.NA/nrow(loan),
+                       per80 = num.NA/nrow(loan)>=0.2,
+                           name = names(num.NA),
+                       row.names = NULL) # convert to data.frame
+
+options(repr.plot.width=8, repr.plot.height=4)
+ggplot(data = dfnum.NA, aes(x=ind, y=percentage)) + 
+  geom_bar(aes(fill=per80), stat="identity") + 
+  scale_x_discrete(name ="column names", 
+                   limits=dfnum.NA$name)+
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=.5),
+        legend.position = "none") +
+  geom_hline(yintercept = 0.2) + 
+  ggtitle("percentage of missing")
+
+# # Impute missing values with median
+for(col.i in names(num.NA)[which(num.NA > 0)]) {
+  remain.loan[which(is.na(remain.loan[,col.i])), col.i] <- median(remain.loan[,col.i], na.rm = T)
+}
+
+remain.loan$inq_last_6mths <- with(remain.loan, ifelse(inq_last_6mths <= 3, as.character(inq_last_6mths), ifelse(inq_last_6mths <= 10, "3-10", "10+")))
+
+# Use MICE package to compute missing values
+# library(mice)
+# md.pattern(remain.loan)
+# 
+# library(VIM)
+# aggr_plot <- aggr(remain.loan, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(remain.loan), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+# 
+# tempdf <- mice(remain.loan[,c("revol_util","collections_12_mths_ex_med","delinq_2yrs","inq_last_6mths","open_acc","pub_rec","total_acc","acc_now_delinq","annual_inc")], m = 1, maxit = 50, meth = "pmm", seed = 500)
+# 
+# summary(tempdf)
+# densityplot(tempdf)
+```
+
+## EDA
+## Continuous Variables
+```{r}
+library(corrplot)
+m <- cor(remain.loan[,c("int_rate","tot_coll_amt","tot_cur_bal","total_rev_hi_lim", "revol_util", "collections_12_mths_ex_med", "delinq_2yrs", "open_acc", "pub_rec", "total_acc", "acc_now_delinq", "annual_inc", "loan_amnt", "dti", "revol_bal")], use="pairwise.complete.obs")
+corrplot(m, method = "circle")
+```
+
+
+## int_rate
+```{r}
+library(ggplot2)
+ggplot(data = remain.loan) +
+  geom_histogram(aes(x = int_rate, y = ..density..)) +
+  geom_density(aes(x = int_rate), col = "red")
+```
+* Distribution of the response variable seems to be slightly right skewed. There seems to be multimodal distributio which might be caused by other features such as states, grade, income, and etc.
+
+```{r}
+library(ggplot2)
+plot <- ggplot(data = remain.loan)
+```
+
+##1 tot_coll_amt
+```{r}
+anova(lm(int_rate ~ tot_coll_amt, remain.loan))
+
+plot +
+  geom_histogram(aes(x = tot_coll_amt, y = ..density..)) +
+  xlim(0, 10000) +
+  ylim(0, 0.00005)
+```
+##2 tot_cur_bal
+```{r}
+summary(lm(int_rate ~ tot_cur_bal, remain.loan))
+```
+
+##3 Total revolving high credit/credit limit
+```{r}
+summary(lm(int_rate ~ total_rev_hi_lim, remain.loan))
+```
+##4 Revolving line utilization rate, or the amount of credit the borrower is using relative to all available revolving credit.
+```{r}
+summary(lm(int_rate ~ revol_util, remain.loan))
+```
+
+##5 Number of collections in 12 months excluding medical collections
+```{r}
+summary(lm(int_rate ~ collections_12_mths_ex_med, remain.loan))
+```
+
+##6 The number of 30+ days past-due incidences of delinquency in the borrower's credit file for the past 2 years
+```{r}
+summary(lm(int_rate ~ delinq_2yrs, remain.loan))
+```
+
+#7 inq_last_6mths
+```{r}
+table(remain.loan$inq_last_6mths)
+summary(lm(int_rate ~ inq_last_6mths, data = remain.loan))
+```
+
+##8
+```{r}
+summary(lm(int_rate ~ open_acc, remain.loan))
+```
+
+##9
+```{r}
+summary(lm(int_rate ~ pub_rec, remain.loan))
+```
+
+##10 total acc
+```{r}
+table(remain.loan$total_acc)
+ggplot(data = remain.loan) + geom_histogram(aes(x = total_acc, y = ..density..), bins = 200)
+```
+
+##11 The number of accounts on which the borrower is now delinquent
+```{r}
+summary(lm(int_rate ~ acc_now_delinq, remain.loan))
+```
+
+##12 Annual Income
+```{r}
+plot + 
+  geom_histogram(aes(x = annual_inc, y = ..density..)) +
+  geom_density(aes(x = annual_inc), col = "red") +
+  xlim(0, 300000)
+
+summary(remain.loan$annual_inc)
+
+# 
+summary(lm(int_rate ~ annual_inc, data = remain.loan))
+```
+##13 loan_amount
+```{r}
+# Perform significance test on loan_amnt
+lm1 <- lm(int_rate ~ loan_amnt, data = remain.loan)
+anova(lm1)
+
+# Distribution of loan amount
+ggplot(data = remain.loan) + 
+  geom_histogram(aes(x = loan_amnt, y = ..density..)) +
+  geom_density(aes(x = loan_amnt), col = "red")
+```
+
+##14 emp_length
+```{r}
+# Barplot of employment length
+ggplot(data = remain.loan) +
+  geom_bar(aes(x = emp_length))
+
+# Boxplot of int_rate by employment length
+ggplot(data = remain.loan) +
+  geom_boxplot(aes(x = emp_length, y = int_rate))
+
+ggplot(data = remain.loan) +
+  geom_boxplot(aes(x = factor(emp_length), y = loan_amnt)) +
+  labs(x = "Employment Years")
+
+# t-test
+with(remain.loan, t.test(int_rate ~ emp_length))
+
+# anova
+fit <- aov(int_rate ~ emp_length, data = remain.loan, na.action = na.omit)
+summary(fit)
+```
+
+##15 dti
+```{r}
+plot + 
+  geom_histogram(aes(x = dti, y = ..density..)) +
+  xlim(0, 50)
+```
+
+##16 revolving balance
+```{r}
+summary(lm(int_rate ~ revol_bal, remain.loan))
+```
+
+
+# Categorical 
+##17 term
+```{r}
+table(remain.loan$term)
+plot +
+  geom_boxplot(aes(x = term, y = int_rate))
+```
+
+##18 Home-ownership
+```{r}
+table(remain.loan$home_ownership)
+
+ggplot(data = remain.loan) +
+  geom_boxplot(aes(x = home_ownership, y = int_rate)) +
+  labs(x = "Home Ownership")
+
+# anova
+summary(aov(int_rate ~ home_ownership, data = remain.loan))
+```
+
+##19 verficiation status
+```{r}
+table(loan$verification_status)
+
+plot + geom_boxplot(aes(x = verification_status, y = int_rate))
+
+# anova
+fit <- aov(int_rate ~ verification_status, data = remain.loan)
+summary(fit)
+```
+
+##21 addr_state
+```{r}
+summary(lm(int_rate ~ addr_state, data = remain.loan)) # Modeling wise: This is slow and adds complexity
+```
+
+##22 initial list status
+```{r}
+plot +
+  geom_boxplot(aes(x = initial_list_status, y = int_rate))
+```
+##23 application type
+```{r}
+plot +
+  geom_boxplot(aes(x = application_type, y = int_rate))
+```
+
+## Model Buidling
+```{r}
+library(zoo)
+library(glmnet)
+set.seed(1)
+
+# change all the character to factor
+remain.loan[sapply(remain.loan, is.character)] <- lapply(remain.loan[sapply(remain.loan, is.character)], as.factor)
+
+# Split test/train dataset
+train.index <- sample(1:nrow(remain.loan), 0.7 * nrow(remain.loan))
+train <- remain.loan[train.index, ]
+test <- remain.loan[-train.index, ]
+```
+
+## Linear Regression
+```{r}
+# Linear Regression Model
+lm1 <- lm(int_rate ~ ., data = train)
+summary(lm1)
+
+# Standardization: Use scale 
+train.scale <- train
+summary(train.scale)
+train.scale[,c(1:6,8:13,15,20,21)] <- scale(train.scale[,c(1:6,8:13,15,20,21)])
+
+lm2 <- lm(int_rate ~ ., train.scale)
+summary(lm2)
+
+# Interest rate can only be positive: log-transformation of int_rate
+lm1_1 <- lm(log(int_rate) ~ ., train)
+summary(lm1_1)
+
+# Diagnostics
+par(mfrow = c(2,2))
+plot(lm1_1)
+
+# Use Cooks Distance to detect outliers 
+cooksd <- cooks.distance(lm1_1)
+head(sort(cooksd, decreasing = T))
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance")  # plot cook's distance
+text(x=1:length(cooksd)+1, y=cooksd, labels=ifelse(cooksd>4*mean(cooksd, na.rm=T),names(cooksd),""), col="red")  # add labels
+
+# Remove outliers
+which(cooksd > 10)
+train1 <- train[-c(45251,265546), ]
+lm1_2 <- lm(log(int_rate) ~ ., data = train1)
+cooksd1 <- cooks.distance(lm1_2)
+head(sort(cooksd1, decreasing = T))
+par(mfrow=c(2,2))
+plot(lm1_2)
+
+# Check multicollinearity using vif
+library(car)
+vif(lm1_2)
+
+# Prediction
+pred <- predict(lm1_2, test)
+sqrt(sum((pred - test$int_rate) ^ 2) / length(pred))
+
+# Regularization with glmnet
+ind <- train[,-15]
+ind <- model.matrix(~., ind)
+dep <- train[,15]
+
+fit <- glmnet(x = ind, y = dep)
+par(mar = c(5.1, 6, 4.1, 2.1)) # default: 5.1, 4.1, 4.1, 2.1
+plot(fit, xvar = "lambda", label = T, yaxt = "n", ylab = "")
+
+# We can choose lambda by checking the picture, Still kinda subjective
+# use cross validation to get optimal value of lambda, 
+cvfit <- cv.glmnet(ind, dep)
+plot(cvfit)
+
+# Two selected lambdas are shown, 
+cvfit$lambda.min # value of lambda gives minimal mean cross validated error
+cvfit$lambda.1se # most regularized model such that error is within one std err of the minimum
+
+# predict result with minimum mean cross-validated error
+newX <- model.matrix(~.,data=test[,-15])
+glm.pred = predict(cvfit, newx = newX, s = "lambda.min")
+sqrt(sum(glm.pred - test$int_rate) ^2 / length(glm.pred))
+```
+
+## decision tree
+```{r}
+# Decision Tree
+library(rpart)
+tree0 <- rpart(int_rate ~ ., method = "anova", data = train, control = rpart.control(cp = 0.002)) # cp is the alpha(control parameter)
+tree1  <- rpart(int_rate ~ ., method = "anova", data = train, control = rpart.control(cp = 0.1)) # oversimplied tree, control parameter is large
+
+printcp(tree0) 
+# xerror: cross validation error
+# xstd: cross validation standard error
+# rel error: training error
+plotcp(tree0)
+bestcp <- tree0$cptable[which.min(tree0$cptable[,'xerror'])]
+
+# prune
+tree.pruned <- prune(tree0, cp = bestcp)
+
+# check rmse
+test.pred1 <- predict(tree0, test)
+sqrt(sum((test.pred1 - test$int_rate) ^ 2) / length(test.pred1))
+
+# visulization
+library(rpart.plot)
+plot(tree0, uniform = T)
+text(tree0, cex = 0.8, use.n = T, xpd = T)
+prp(tree0)
+```
+
+## random forest
+```{r}
+#Random Forest
+library(randomForest)
+rf <- randomForest(x = train[,-15], y = train[,15], importance = T, do.trace = T, nodesize = 6200, ntree = 10) # rule of thumb, choose nodesize to be 1% of number of rows
+getTree(rf, k = 1, labelVar = T)
+
+# check importance of variables: measure increase in mse when variable is dropped
+varImpPlot(rf)
+importance(rf, type = 1)
+importanceOrder <- order(rf$importance[,"%IncMSE"],decreasing = T)
+names <- rownames(rf$importance)[importanceOrder]
+partialPlot(rf, train, eval("loan_amnt"), xlab = "loan amount")
+
+test.pred2 <- predict(rf, test)
+sqrt(sum((test.pred2 - test$int_rate) ^ 2) / length(test.pred2))
+```
+
+## xgboost
+```{r}
+# library(xgboost)
+# train.label <- train$int_rate
+# feature.matrix <- model.matrix(~., train[,-15])
+# gbt <- xgboost(data = feature.matrix,
+#                label = train.label,
+#                max_depth = 8,
+#                nrounds = 20,
+#                objective = "reg:linear",
+#                verbose = 1)
+# importance <- xgb.importance(feature_names = colnames(feature.matrix), model = gbt)
+# importance
+# 
+# # gain measures predictive power
+# xgb.plot.importance(importance)
+# 
+# 
+# # cross validation
+# gbt.cv <- xgb.cv(data = feature.matrix,
+#                  label = train.label,
+#                  max_depth = 8,
+#                  objective = "reg:linear",
+#                  verbose = 1,
+#                  nfold = 5,
+#                  nrounds = 30)
+# plot(gbt.cv$evaluation_log$train_rmse_mean, type = "l")
+# lines(gbt.cv$evaluation_log$test_rmse_mean, col = "red")
+# 
+# # grid search to find the best hyperparameter setting(nround, max_depth)
+# all_param <- NULL
+# all_test_rmse <- NULL
+# all_train_rmse <- NULL
+# 
+# for(iter in 1:100){
+#   print(iter)
+#   param <- list(max_depth = sample(5:12, 1),
+#                 nrounds = sample(seq(5, 50, 5), 1))
+#   set.seed(iter)
+#   cv.nfold = 5
+#   mdcv <- xgb.cv(data = feature.matrix,
+#                  label = train.label, objective = "reg:linear",
+#                  params = param, nfold = cv.nfold)
+#   min_train_rmse <- min(mdcv$evaluation_log$train_rmse_mean)
+#   min_test_rmse <- min(mdcv$evaluation_log$test_rmse_mean)
+# 
+#   all_param <- rbind(all_param, unlist(param))
+#   all_test_rmse <- c(all_test_rmse, min_test_rmse)
+#   all_train_rmse <- c(all_train_rmse, min_train_rmse)
+# }
+# 
+# all_param = NULL
+# all_test_rmse = NULL
+# all_train_rmse = NULL
+# 
+# for (iter in 1:20) {
+#   print(iter)
+#   param <- list(objective = "reg:linear",
+#                 max_depth = sample(5:12, 1), 
+#                 subsample = runif(1, .6, .9)
+#                 #   eta = runif(1, .01, .3)
+#                 #  gamma = runif(1, 0.0, 0.2),
+#                 #  colsample_bytree = runif(1, .5, .8), 
+#                 #  min_child_weight = sample(1:40, 1),
+#                 #  max_delta_step = sample(1:10, 1)
+#   )
+#   cv.nround = 10
+#   cv.nfold = 5
+#   set.seed(iter)
+#   mdcv <- xgb.cv(data=feature.matrix, label = train.label, params = param, 
+#                  nfold=cv.nfold, nrounds=cv.nround,
+#                  verbose = T, # early_stop_round=8, 
+#                  maximize = FALSE)
+#   min_train_rmse = min(mdcv$evaluation_log$train_rmse_mean)
+#   min_test_rmse = min(mdcv$evaluation_log$test_rmse_mean)
+#   
+#   all_param <- rbind(all_param, unlist(param)[-1])
+#   all_train_rmse <- c(all_train_rmse, min_train_rmse)
+#   all_test_rmse <- c(all_test_rmse, min_test_rmse)
+# }
+# 
+# all_param <- as.data.frame(as.numeric(all_param))
+# cbind(all_param, all_test_rmse)
+# summary(all_test_rmse[which(all_param == 5)])
+# summary(all_test_rmse[which(all_param == 12)])
+# # then build the model with best parameter combination from the cross validation result.
+# 
+# # prediction
+# test <- test[which(apply(test, 1, function(x) length(which(is.na(x))) == 0)), ]
+# prediction <- predict(gbt, model.matrix( ~ ., data = test))
+# sqrt(sum((prediction - test$int_rate) ^ 2) / length(prediction))
+```
+
