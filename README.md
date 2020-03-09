@@ -10,10 +10,14 @@
   * `Term`, `Grade`, `Delinquency`, `Annual Income` seems to be highly correlated with default
  
 * **Feature Engineering**:
- * Wrapper: Wrapper method is also known as the feature ranking with recursive feature elimination and implemented using sklearn machine learning module. The goal of RFE is to select features recursively by considering a smaller and smaller subsets of features. Initially, the model is trained on all of the variables and feature important of each variable is computed. Then the least significant variable is dropped from the model. This process is repeated until a desired number of features is reached. We used RFE to dropped until we have 30 features left.
- * Filter: Then we used Pearson correlation based filter method to remove features that are highly correlated.
+  * Wrapper: Wrapper method is also known as the feature ranking with recursive feature elimination and implemented using sklearn machine learning module. The goal of RFE is to select features recursively by considering a smaller and smaller subsets of features. Initially, the model is trained on all of the variables and feature important of each variable is computed. Then the least significant variable is dropped from the model. This process is repeated until a desired number of features is reached. We used RFE to dropped until we have 30 features left.
+  * Filter: Then we used Pearson correlation based filter method to remove features that are highly correlated.
 
 * **Model Building**:
- * Xgboost:
- * SMOTE: Synthetic Minority Over-sampling Technique
+  * Xgboost:
+  * SMOTE: Synthetic Minority Over-sampling Technique
 Over-sampling technique by creating synthetic examples rather than over-sampling with replacement. The minority class is over-sampled by taking each minority class sample and introduce synthetic examples along the line segments joining any/all of the k minority class nearest neighbors.
+
+* **Recommendation**:
+  * RFE with cross-validation to determine number of features to include
+  * Use more sophicated model like Neural Network
